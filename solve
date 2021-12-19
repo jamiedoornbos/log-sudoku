@@ -1,0 +1,196 @@
+#!env python
+
+import argparse
+
+NUMBERS = list(range(1, 10))
+GRID_T = '═════'.join(['╔', '╤', '╤', '╦', '╤', '╤', '╦', '╤', '╤', '╗'])
+GRID_M = '─────'.join(['╟', '┼', '┼', '╫', '┼', '┼', '╫', '┼', '┼', '╢'])
+GRID_N = '═════'.join(['╠', '╪', '╪', '╬', '╪', '╪', '╬', '╪', '╪', '╣'])
+GRID_B = '═════'.join(['╚', '╧', '╧', '╩', '╧', '╧', '╩', '╧', '╧', '╝'])
+GRID_C = '║ {} │ {} │ {} ║ {} │ {} │ {} ║ {} │ {} │ {} ║'
+BOX_OFFSETS = [(column, row) for row in range(3) for column in range(3)]
+BOX_CORNERS = [(column, row) for row in (0, 3, 6) for column in (0, 3, 6)]
+
+
+class SolveError(Exception):
+	pass
+
+
+class Location:
+	def __init__(self, column, row):
+		self.column = column
+		self.row = row
+
+
+	def __str__(self):
+		return f'({self.column}, {self.row})'
+
+	@property
+	def box(self) -> int:
+		return 3 * (self.row // 3) + self.column // 3
+
+
+class Cell:
+	def __init__(self, location: Location):
+		assert location
+		self.location = location
+		self.groups = []
+		self._allowed = set(NUMBERS)
+		self._value = None
+
+	@property
+	def value(self):
+		return self._value
+
+	@value.setter
+	def value(self, value):
+		assert value
+		self._value = value
+		self._allowed = None
+		for group in self.groups:
+			group.cell_updated(self)
+
+	@property
+	def allowed(self) -> set[int]:
+		return self._allowed
+
+	def disallow(self, number):
+		if self._value:
+			if self.value == number:
+				raise SolveError(f'Contradiction: disallowing {number} in cell {self}')
+			return
+		self._allowed.discard(number)
+		if len(self._allowed) == 0:
+			raise SolveError(f'Contradiction: nothing is allowed in {self}')
+
+	def __str__(self):
+		base = f'cell at {self.location}'
+		if self.value:
+			return f'{base}, value {self.value}'
+		allowed = ''.join(str(number) for number in self._allowed)
+		return f'{base}, allowed: {allowed}'
+
+	def format(self) -> list[str]:
+		if self.value:
+			# return ['┏━┓', f'┃{self.value}┃', '┗━┛']
+			# return ['   ', f' {self.value} ', ' ▽ ']
+			return ['╭─╮', f'│{self.value}│', '╰─╯']
+			# return ['╭ ╮', f' {self.value} ', '╰ ╯']
+			# return ['   ', f' {self.value} ', ' ◦ ']
+		grid = ''.join(' ' if number not in self._allowed else str(number) for number in NUMBERS)
+		return [grid[:3], grid[3:6], grid[6:]]
+
+
+class Group:
+	def __init__(self, name, cells):
+		self.name = name
+		self.cells = cells
+		for cell in cells:
+			cell.groups.append(self)
+
+	def __iter__(self):
+		return iter(self.cells)
+
+	def cell_updated(self, cell: Cell):
+		for other_cell in self.cells:
+			if other_cell == cell:
+				continue
+			other_cell.disallow(cell.value)
+
+
+class Board:
+	def __init__(self):
+		numbers = range(len(NUMBERS))
+		self.columns = [Group(f'Column {column}', [Cell(Location(column, row)) for row in numbers]) for column in numbers]
+		self.rows = [Group(f'Row {row}', [self.get_cell(column, row) for column in numbers]) for row in numbers]
+		self.boxes = [Group(f'Box {box_left + 1}, {box_top + 1}', [
+			self.get_cell(box_left + column, box_top + row) for column, row in BOX_OFFSETS
+		]) for box_left, box_top in BOX_CORNERS]
+
+	def get_cell(self, column, row):
+		return self.columns[column].cells[row]
+
+	def __iter__(self):
+		for column in self.columns:
+			yield from column
+
+
+class BoardPrinter:
+	@staticmethod
+	def format1(board: Board) -> str:
+		lines = []
+		lines.append('━━━━━'.join(['┏'] + ['┳'] * 8 + ['┓']))
+		for row_number, row in enumerate(board.rows):
+			if row_number:
+				lines.append('━━━━━'.join(['┣'] + ['╋'] * 8 + ['┫']))
+			formatted_cells = [cell.format() for cell in row]
+			for line in range(len(formatted_cells[0])):
+				lines.append(' ┃ '.join('   ' for cell in formatted_cells))
+				# lines.append(' ┃ '.join(cell[line] for cell in formatted_cells))
+				lines[-1] = f'┃ {lines[-1]} ┃'
+		lines.append('━━━━━'.join(['┗'] + ['┻'] * 8 + ['┛']))
+		return '\n'.join(lines)
+
+	def format(board: Board) -> str:
+		lines = []
+		lines.append(GRID_T)
+		for row_number, row in enumerate(board.rows):
+			if row_number:
+				lines.append(GRID_M if row_number % 3 else GRID_N)
+			formatted_cells = [cell.format() for cell in row]
+			for line in range(len(formatted_cells[0])):
+				lines.append(GRID_C.format(*tuple(cell[line] for cell in formatted_cells)))
+		lines.append(GRID_B)
+		return '\n'.join(lines)
+
+class BoardLoader:
+	@staticmethod
+	def from_file(path) -> 'Board':
+		with open(path) as fp:
+			rows = [[char for char in line.rstrip()] for line in fp]
+
+		size = len(NUMBERS)
+		if len(rows) != size:
+			raise Exception(f'Wrong number of rows {len(rows)}')
+
+		board = Board()
+		for row_number, row in enumerate(rows):
+			if len(row) != size:
+				raise Exception(f'Wrong number of columns in row {row_number}: {len(row)} ({repr(row)}')
+
+			for column_number, value in enumerate(row):
+				location = (column_number, row_number)
+				if value not in ('.', ' '):
+					number = int(value)
+					if not (NUMBERS[0] <= number <= NUMBERS[-1]):
+						raise Exception(f'Cell at {location} is out of range: {value}')
+					board.get_cell(*location).value = number
+
+		return board
+
+
+class Solver:
+	def __init__(self, board):
+		self.board = board
+
+	def one_move(self):
+		for cell in self.board:
+			if not cell.value and len(cell.allowed) == 1:
+				value = next(iter(cell.allowed))
+				print(f'Setting {cell} to {value}')
+				cell.value = value
+				return
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('file', metavar='PATH', help='file of puzzle')
+    args = parser.parse_args()
+
+    board = BoardLoader.from_file(args.file)
+    Solver(board).one_move()
+    print(BoardPrinter.format(board))
+
+
+if __name__ == '__main__':
+	main()
