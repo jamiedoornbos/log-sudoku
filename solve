@@ -3,14 +3,6 @@
 import argparse, re, itertools, time
 
 NUMBERS = list(range(1, 10))
-NUMBERS_SET = set(NUMBERS)
-GRID_T = '═════'.join(['╔', '╤', '╤', '╦', '╤', '╤', '╦', '╤', '╤', '╗'])
-GRID_M = '─────'.join(['╟', '┼', '┼', '╫', '┼', '┼', '╫', '┼', '┼', '╢'])
-GRID_N = '═════'.join(['╠', '╪', '╪', '╬', '╪', '╪', '╬', '╪', '╪', '╣'])
-GRID_B = '═════'.join(['╚', '╧', '╧', '╩', '╧', '╧', '╩', '╧', '╧', '╝'])
-GRID_C = '║ {} │ {} │ {} ║ {} │ {} │ {} ║ {} │ {} │ {} ║'
-BOX_OFFSETS = [(column, row) for row in range(3) for column in range(3)]
-BOX_CORNERS = [('ABCDEFGHI'[row + column // 3], column, row) for row in (0, 3, 6) for column in (0, 3, 6)]
 
 
 class SolveError(Exception):
@@ -22,13 +14,8 @@ class Location:
         self.column = column
         self.row = row
 
-
     def __str__(self):
         return f'({self.column + 1}, {self.row + 1})'
-
-    @property
-    def box(self) -> int:
-        return 3 * (self.row // 3) + self.column // 3
 
 
 class Cell:
@@ -58,7 +45,7 @@ class Cell:
     def disallow(self, number):
         if self._value:
             if self.value == number:
-                raise SolveError(f'Contradiction: disallowing {number} in cell {self}')
+                raise SolveError(f'Contradiction: disallowing {number} in {self}')
             return
         self._allowed.discard(number)
         if len(self._allowed) == 0:
@@ -67,19 +54,9 @@ class Cell:
     def __str__(self):
         base = f'cell at {self.location}'
         if self.value:
-            return f'{base}, value {self.value}'
-        allowed = ''.join(str(number) for number in self._allowed)
-        return f'{base}, allowed: {allowed}'
-
-    def format(self) -> list[str]:
-        if self.value:
-            # return ['┏━┓', f'┃{self.value}┃', '┗━┛']
-            # return ['   ', f' {self.value} ', ' ▽ ']
-            return ['╭─╮', f'│{self.value}│', '╰─╯']
-            # return ['╭ ╮', f' {self.value} ', '╰ ╯']
-            # return ['   ', f' {self.value} ', ' ◦ ']
-        grid = ''.join(' ' if number not in self._allowed else str(number) for number in NUMBERS)
-        return [grid[:3], grid[3:6], grid[6:]]
+            return f'{base} (value {self.value})'
+        allowed = ''.join(str(number) for number in self.allowed)
+        return f'{base} (allowed {allowed})'
 
 
 class Group:
@@ -118,17 +95,26 @@ class Group:
 
 
 class Board:
+    BOX_OFFSETS = [
+        (column, row) for row in range(3) for column in range(3)
+    ]
+
+    BOX_CORNERS = [
+        (f'''{'LCR'[row // 3]}{'TCB'[column // 3]}''', column, row)
+        for row in (0, 3, 6) for column in (0, 3, 6)
+    ]
+
     def __init__(self):
-        numbers = range(len(NUMBERS))
+        coordinates = range(len(NUMBERS))
         self.columns = [
-            Group(f'Column {column + 1}', [Cell(Location(column, row)) for row in numbers]) for column in numbers
+            Group(f'Column {column + 1}', [Cell(Location(column, row)) for row in coordinates]) for column in coordinates
         ]
         self.rows = [
-            Group(f'Row {row + 1}', [self.get_cell(column, row) for column in numbers]) for row in numbers
+            Group(f'Row {row + 1}', [self.get_cell(column, row) for column in coordinates]) for row in coordinates
         ]
         self.boxes = [
-            Group(f'Box {name}', [self.get_cell(box_left + column, box_top + row) for column, row in BOX_OFFSETS])
-            for name, box_left, box_top in BOX_CORNERS
+            Group(f'Box {name}', [self.get_cell(box_left + column, box_top + row) for column, row in self.BOX_OFFSETS])
+            for name, box_left, box_top in self.BOX_CORNERS
         ]
         self.groups = self.rows + self.columns + self.boxes
 
@@ -141,32 +127,37 @@ class Board:
 
 
 class BoardPrinter:
-    @staticmethod
-    def format1(board: Board) -> str:
+    TOP, MIDDLE, MIDDLE_HEAVY, BOTTOM, CELL = (
+        '═════'.join(['╔', '╤', '╤', '╦', '╤', '╤', '╦', '╤', '╤', '╗']),
+        '─────'.join(['╟', '┼', '┼', '╫', '┼', '┼', '╫', '┼', '┼', '╢']),
+        '═════'.join(['╠', '╪', '╪', '╬', '╪', '╪', '╬', '╪', '╪', '╣']),
+        '═════'.join(['╚', '╧', '╧', '╩', '╧', '╧', '╩', '╧', '╧', '╝']),
+        '║ {} │ {} │ {} ║ {} │ {} │ {} ║ {} │ {} │ {} ║'
+    )
+
+    @classmethod
+    def format(cls, board: Board) -> str:
         lines = []
-        lines.append('━━━━━'.join(['┏'] + ['┳'] * 8 + ['┓']))
+        lines.append(cls.TOP)
         for row_number, row in enumerate(board.rows):
             if row_number:
-                lines.append('━━━━━'.join(['┣'] + ['╋'] * 8 + ['┫']))
-            formatted_cells = [cell.format() for cell in row]
+                lines.append(cls.MIDDLE if row_number % 3 else cls.MIDDLE_HEAVY)
+            formatted_cells = [cls.format_cell(cell) for cell in row]
             for line in range(len(formatted_cells[0])):
-                lines.append(' ┃ '.join('   ' for cell in formatted_cells))
-                # lines.append(' ┃ '.join(cell[line] for cell in formatted_cells))
-                lines[-1] = f'┃ {lines[-1]} ┃'
-        lines.append('━━━━━'.join(['┗'] + ['┻'] * 8 + ['┛']))
+                lines.append(cls.CELL.format(*tuple(cell[line] for cell in formatted_cells)))
+        lines.append(cls.BOTTOM)
         return '\n'.join(lines)
 
-    def format(board: Board) -> str:
-        lines = []
-        lines.append(GRID_T)
-        for row_number, row in enumerate(board.rows):
-            if row_number:
-                lines.append(GRID_M if row_number % 3 else GRID_N)
-            formatted_cells = [cell.format() for cell in row]
-            for line in range(len(formatted_cells[0])):
-                lines.append(GRID_C.format(*tuple(cell[line] for cell in formatted_cells)))
-        lines.append(GRID_B)
-        return '\n'.join(lines)
+    @classmethod
+    def format_cell(cls, cell: Cell) -> list[str]:
+        if cell.value:
+            # return ['┏━┓', f'┃{cell.value}┃', '┗━┛']
+            # return ['   ', f' {cell.value} ', ' ▽ ']
+            return ['╭─╮', f'│{cell.value}│', '╰─╯']
+            # return ['╭ ╮', f' {cell.value} ', '╰ ╯']
+            # return ['   ', f' {cell.value} ', ' ◦ ']
+        grid = ''.join(' ' if number not in cell.allowed else str(number) for number in NUMBERS)
+        return [grid[:3], grid[3:6], grid[6:]]
 
 
 class BoardLoader:
@@ -266,7 +257,7 @@ class Solver:
         for cell in self.board:
             if not cell.value and len(cell.allowed) == 1:
                 value = next(iter(cell.allowed))
-                self.comment = f'In {cell}, only one number is allowed'
+                self.comment = f'In cell at {cell.location}, only {next(iter(cell.allowed))} is allowed'
                 print(f'{self.comment}')
                 cell.value = value
                 return True
