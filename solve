@@ -1,15 +1,16 @@
 #!env python
 
-import argparse
+import argparse, re, itertools, time
 
 NUMBERS = list(range(1, 10))
+NUMBERS_SET = set(NUMBERS)
 GRID_T = '═════'.join(['╔', '╤', '╤', '╦', '╤', '╤', '╦', '╤', '╤', '╗'])
 GRID_M = '─────'.join(['╟', '┼', '┼', '╫', '┼', '┼', '╫', '┼', '┼', '╢'])
 GRID_N = '═════'.join(['╠', '╪', '╪', '╬', '╪', '╪', '╬', '╪', '╪', '╣'])
 GRID_B = '═════'.join(['╚', '╧', '╧', '╩', '╧', '╧', '╩', '╧', '╧', '╝'])
 GRID_C = '║ {} │ {} │ {} ║ {} │ {} │ {} ║ {} │ {} │ {} ║'
 BOX_OFFSETS = [(column, row) for row in range(3) for column in range(3)]
-BOX_CORNERS = [(column, row) for row in (0, 3, 6) for column in (0, 3, 6)]
+BOX_CORNERS = [('ABCDEFGHI'[row + column // 3], column, row) for row in (0, 3, 6) for column in (0, 3, 6)]
 
 
 class SolveError(Exception):
@@ -23,7 +24,7 @@ class Location:
 
 
 	def __str__(self):
-		return f'({self.column}, {self.row})'
+		return f'({self.column + 1}, {self.row + 1})'
 
 	@property
 	def box(self) -> int:
@@ -91,21 +92,45 @@ class Group:
 	def __iter__(self):
 		return iter(self.cells)
 
+	def __str__(self):
+		return self.name
+
 	def cell_updated(self, cell: Cell):
 		for other_cell in self.cells:
 			if other_cell == cell:
 				continue
 			other_cell.disallow(cell.value)
 
+	@property
+	def open_cells(self):
+		for cell in self.cells:
+			if not cell.value:
+				yield cell
+
+	@property
+	def filled_cells(self):
+		for cell in self.cells:
+			if cell.value:
+				yield cell
+
+	def has_value(self, number):
+		return any(cell.value == number for cell in self.filled_cells)
+
 
 class Board:
 	def __init__(self):
 		numbers = range(len(NUMBERS))
-		self.columns = [Group(f'Column {column}', [Cell(Location(column, row)) for row in numbers]) for column in numbers]
-		self.rows = [Group(f'Row {row}', [self.get_cell(column, row) for column in numbers]) for row in numbers]
-		self.boxes = [Group(f'Box {box_left + 1}, {box_top + 1}', [
-			self.get_cell(box_left + column, box_top + row) for column, row in BOX_OFFSETS
-		]) for box_left, box_top in BOX_CORNERS]
+		self.columns = [
+			Group(f'Column {column + 1}', [Cell(Location(column, row)) for row in numbers]) for column in numbers
+		]
+		self.rows = [
+			Group(f'Row {row + 1}', [self.get_cell(column, row) for column in numbers]) for row in numbers
+		]
+		self.boxes = [
+			Group(f'Box {name}', [self.get_cell(box_left + column, box_top + row) for column, row in BOX_OFFSETS])
+			for name, box_left, box_top in BOX_CORNERS
+		]
+		self.groups = self.rows + self.columns + self.boxes
 
 	def get_cell(self, column, row):
 		return self.columns[column].cells[row]
@@ -143,53 +168,180 @@ class BoardPrinter:
 		lines.append(GRID_B)
 		return '\n'.join(lines)
 
+
 class BoardLoader:
-	@staticmethod
-	def from_file(path) -> 'Board':
+	FORMAT = re.compile(r'^Format: (?P<format>\S+)$')
+	COMMENT = re.compile(r'^\s*(#.*)?$')
+	CELL_SEPARATOR = re.compile(r'\s+')
+	START_FORMAT = 'start'
+	SOLVER_FORMAT = 'solver'
+
+	@classmethod
+	def from_file(cls, path) -> 'Board':
+		data_format = cls.START_FORMAT
+		board_lines = []
 		with open(path) as fp:
-			rows = [[char for char in line.rstrip()] for line in fp]
+			for line in fp:
+				match = cls.COMMENT.match(line)
+				if match:
+					continue
+
+				match = cls.FORMAT.match(line)
+				if match:
+					data_format = match.group('format')
+					continue
+
+				board_lines.append(line)
 
 		size = len(NUMBERS)
-		if len(rows) != size:
-			raise Exception(f'Wrong number of rows {len(rows)}')
+
+		if len(board_lines) < size:
+			raise Exception(f'Not enough rows {len(board_lines)}')
+
+		if data_format not in (cls.START_FORMAT, cls.SOLVER_FORMAT):
+			raise Exception(f'Invalid data format {data_format}')
 
 		board = Board()
-		for row_number, row in enumerate(rows):
-			if len(row) != size:
-				raise Exception(f'Wrong number of columns in row {row_number}: {len(row)} ({repr(row)}')
+		board_lines = [line.rstrip() for line in board_lines[-size:]]
 
-			for column_number, value in enumerate(row):
+		if data_format == cls.START_FORMAT:
+			for row_number, row in enumerate(board_lines):
+				if len(row) != size:
+					raise Exception(f'Wrong number of columns in row {row_number}: {len(row)} ({repr(row)}')
+
+				for column_number, value in enumerate(row):
+					location = (column_number, row_number)
+					if value not in ('.', ' '):
+						number = int(value)
+						if not (NUMBERS[0] <= number <= NUMBERS[-1]):
+							raise Exception(f'Cell at {location} is out of range: {value}')
+						board.get_cell(*location).value = number
+			return board
+
+		for row_number, row in enumerate(board_lines):
+			row_cells = cls.CELL_SEPARATOR.split(row)
+			if len(row_cells) != size:
+				raise Exception(f'Wrong number of columns in row {row_number}: {len(row_cells)} ({repr(row)}')
+			for column_number, value in enumerate(row_cells):
 				location = (column_number, row_number)
-				if value not in ('.', ' '):
-					number = int(value)
+				cell = board.get_cell(*location)
+				if value.startswith('*'):
+					number = int(value[1:])
 					if not (NUMBERS[0] <= number <= NUMBERS[-1]):
 						raise Exception(f'Cell at {location} is out of range: {value}')
-					board.get_cell(*location).value = number
+					cell.value = number
+				else:
+					for number in set(NUMBERS) - set(int(allowed) for allowed in value):
+						cell.disallow(number)
 
 		return board
+
+	@classmethod
+	def append_to_file(cls, path, board, comment=None):
+		with open(path, 'a') as fp:
+			print(file=fp)
+			if comment:
+				print(f'# {comment}', file=fp)
+			print(f'Format: {cls.SOLVER_FORMAT}', file=fp)
+			for row in board.rows:
+				formatted_cells = []
+				for cell in row:
+					if cell.value:
+						formatted_cells.append(f'*{cell.value}')
+					else:
+						formatted_cells.append(''.join(str(number) for number in NUMBERS if number in cell.allowed))
+					formatted_cells[-1] += ' ' * (len(NUMBERS) - len(formatted_cells[-1]))
+				print(' '.join(formatted_cells), file=fp)
 
 
 class Solver:
 	def __init__(self, board):
 		self.board = board
+		self.comment = None
 
-	def one_move(self):
+	def is_solved(self) -> bool:
+		return all(cell.value for cell in self.board)
+
+	def one_move(self) -> bool:
 		for cell in self.board:
 			if not cell.value and len(cell.allowed) == 1:
 				value = next(iter(cell.allowed))
-				print(f'Setting {cell} to {value}')
+				self.comment = f'In {cell}, only one number is allowed'
+				print(f'{self.comment}')
 				cell.value = value
-				return
+				return True
+
+		for group in self.board.groups:
+			for number in NUMBERS:
+				if self.check_singular(group, number):
+					return True
+
+		for size in (2, 3, 4, 5):
+			for group in self.board.groups:
+				if self.check_subgroup(group, size):
+					return True
+
+		return False
+
+	def check_singular(self, group, number):
+		if group.has_value(number):
+			return False
+		allowed_cells = [cell for cell in group.open_cells if number in cell.allowed]
+		if len(allowed_cells) > 1:
+			return False
+		if len(allowed_cells) == 0:
+			raise SolveError(f'Contradiction: {number} is not allowed in any cell in {group}')
+		self.comment = f'{group} allows {number} only in {allowed_cells[0]}'
+		print(f'{self.comment}')
+		allowed_cells[0].value = number
+		return True
+
+	def check_subgroup(self, group, size):
+		open_digits = set().union(*[cell.allowed for cell in group.open_cells])
+		if len(open_digits) < size:
+			return False
+		for digits in map(set, itertools.combinations(open_digits, size)):
+			subgroup = [cell for cell in group.open_cells if cell.allowed <= digits]
+			if len(subgroup) != size:
+				continue
+			cell_count = 0
+			for cell in group.open_cells:
+				if cell in subgroup or not (to_disallow := cell.allowed & digits):
+					continue
+				cell_count += 1
+				for digit in to_disallow:
+					cell.disallow(digit)
+			if not cell_count:
+				continue
+			digit_str = ''.join(str(digit) for digit in digits)
+			self.comment = f'In {group}, cells allowing {digit_str} formed a subgroup'
+			print(f'{self.comment} - disallowed digits in {cell_count} other cells in the group')
+			return True
+
+		return False
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('file', metavar='PATH', help='file of puzzle')
-    args = parser.parse_args()
+	parser = argparse.ArgumentParser()
+	parser.add_argument('file', metavar='PATH', help='file of puzzle')
+	parser.add_argument('--solve', action='store_true', help='Run until done')
+	parser.add_argument('--delay', metavar='SECONDS', help='Sleep between solving turns', type=float, default=0)
+	args = parser.parse_args()
 
-    board = BoardLoader.from_file(args.file)
-    Solver(board).one_move()
-    print(BoardPrinter.format(board))
+	board = BoardLoader.from_file(args.file)
+	solver = Solver(board)
+	while True:
+		if solver.is_solved():
+			print('Solved!')
+			break
+		if not solver.one_move():
+			print('No moves found!')
+			break
+		BoardLoader.append_to_file(args.file, board, solver.comment)
+		print(BoardPrinter.format(board))
+		if not args.solve:
+			break
+		time.sleep(args.delay)
 
 
 if __name__ == '__main__':
