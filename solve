@@ -1,6 +1,6 @@
 #!env python
 
-import argparse, re, itertools, time
+import argparse, re, itertools, time, collections
 
 NUMBERS = list(range(1, 10))
 
@@ -89,6 +89,10 @@ class Group:
         for cell in self.cells:
             if cell.value:
                 yield cell
+
+    @property
+    def type(self) -> str:
+        return self.name[:3]
 
     def has_value(self, number):
         return any(cell.value == number for cell in self.filled_cells)
@@ -272,6 +276,11 @@ class Solver:
                 if self.check_subgroup(group, size):
                     return True
 
+        for group in self.board.groups:
+            for number in NUMBERS:
+                if self.check_cross_group_elimination(group, number):
+                    return True
+
         return False
 
     def check_singular(self, group, number):
@@ -307,6 +316,37 @@ class Solver:
             digit_str = ''.join(str(digit) for digit in digits)
             self.comment = f'In {group}, cells allowing {digit_str} formed a subgroup'
             print(f'{self.comment} - disallowed digits in {cell_count} other cells in the group')
+            return True
+
+        return False
+
+    def check_cross_group_elimination(self, group, number):
+        if group.has_value(number):
+            return False
+
+        type_groups = collections.defaultdict(list)
+        for cell in group:
+            if cell.value or number not in cell.allowed:
+                continue
+            for other_group in cell.groups:
+                if other_group == group or other_group in type_groups[other_group.type]:
+                    continue
+                type_groups[other_group.type].append(other_group)
+
+        singles = [group_list[0] for group_list in type_groups.values() if len(group_list) == 1]
+        if not singles:
+            return False
+
+        cross_group, marked = singles[0], 0
+        for cell in cross_group:
+            if group in cell.groups or cell.value or number not in cell.allowed:
+                continue
+            cell.disallow(number)
+            marked += 1
+
+        if marked:
+            self.comment = f'In {group}, cells allowing {number} were exclusively in {cross_group}'
+            print(f'{self.comment} - disallowed {number} in {marked} cells in {cross_group}')
             return True
 
         return False
