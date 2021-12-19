@@ -14,7 +14,7 @@ class Location:
         self.column = column
         self.row = row
 
-    def __str__(self):
+    def __repr__(self):
         return f'({self.column + 1}, {self.row + 1})'
 
 
@@ -51,7 +51,7 @@ class Cell:
         if len(self._allowed) == 0:
             raise SolveError(f'Contradiction: nothing is allowed in {self}')
 
-    def __str__(self):
+    def __repr__(self):
         base = f'cell at {self.location}'
         if self.value:
             return f'{base} (value {self.value})'
@@ -69,7 +69,7 @@ class Group:
     def __iter__(self):
         return iter(self.cells)
 
-    def __str__(self):
+    def __repr__(self):
         return self.name
 
     def cell_updated(self, cell: Cell):
@@ -271,7 +271,7 @@ class Solver:
                 if self.check_singular(group, number):
                     return True
 
-        for size in (2, 3, 4, 5):
+        for size in (2, 3, 4, 5, 6):
             for group in self.board.groups:
                 if self.check_subgroup(group, size):
                     return True
@@ -280,6 +280,30 @@ class Solver:
             for number in NUMBERS:
                 if self.check_cross_group_elimination(group, number):
                     return True
+
+        for number in NUMBERS:
+            for groups, attr in ((self.board.rows, lambda cell: cell.column), (self.board.columns, lambda cell: cell.row)):
+                if self.check_cross_quads(groups, attr, number):
+                    return True
+
+        return False
+
+    def check_cross_quads(self, groups, coordinate_attr, number):
+        allowed_cells = [
+            [cell for cell in group.open_cells if number in cell.allowed]
+            for group in groups
+        ]
+        allowed_pairs = [cells for cells in allowed_cells if len(cells) == 2]
+        if len(allowed_pairs) < 2:
+            return False
+
+        def _key(cells):
+            return frozenset(coordinate_attr(cell.location) for cell in cells)
+
+        for key, cells in itertools.groupby(allowed_pairs, _key):
+            cells = list(cells)
+            if len(cells) == 2:
+                print(f'QUADS: {number} in {cells}')
 
         return False
 
