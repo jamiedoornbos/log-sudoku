@@ -109,12 +109,11 @@ class Board:
     ]
 
     def __init__(self):
-        coordinates = range(len(NUMBERS))
+        n_range = range(len(NUMBERS))
         self.columns = [
-            Group(f'Column {column + 1}', [Cell(Location(column, row)) for row in coordinates]) for column in coordinates
-        ]
+            Group(f'Column {column + 1}', [Cell(Location(column, row)) for row in n_range]) for column in n_range]
         self.rows = [
-            Group(f'Row {row + 1}', [self.get_cell(column, row) for column in coordinates]) for row in coordinates
+            Group(f'Row {row + 1}', [self.get_cell(column, row) for column in n_range]) for row in n_range
         ]
         self.boxes = [
             Group(f'Box {name}', [self.get_cell(box_left + column, box_top + row) for column, row in self.BOX_OFFSETS])
@@ -129,6 +128,11 @@ class Board:
         for column in self.columns:
             yield from column
 
+    @property
+    def open_cells(self):
+        for column in self.columns:
+            yield from column.open_cells
+
 
 class BoardPrinter:
     TOP, MIDDLE, MIDDLE_HEAVY, BOTTOM, CELL = (
@@ -141,8 +145,7 @@ class BoardPrinter:
 
     @classmethod
     def format(cls, board: Board) -> str:
-        lines = []
-        lines.append(cls.TOP)
+        lines = [cls.TOP]
         for row_number, row in enumerate(board.rows):
             if row_number:
                 lines.append(cls.MIDDLE if row_number % 3 else cls.MIDDLE_HEAVY)
@@ -282,11 +285,58 @@ class Solver:
                     return True
 
         for number in NUMBERS:
-            for groups, attr in ((self.board.rows, lambda cell: cell.column), (self.board.columns, lambda cell: cell.row)):
+            for groups, attr in (
+                (self.board.rows, lambda _cell: _cell.column),
+                (self.board.columns, lambda _cell: _cell.row)
+            ):
                 if self.check_cross_quads(groups, attr, number):
                     return True
 
+        if self.check_fulcrum_pairs():
+            return True
+
         return False
+
+    def check_fulcrum_pairs(self):
+        for fulcrum in self.board.open_cells:
+            if len(fulcrum.allowed) != 2:
+                continue
+            for group1 in fulcrum.groups:
+                for end1 in group1.open_cells:
+                    if end1 == fulcrum or len(end1.allowed) != 2:
+                        continue
+                    allowed1 = end1.allowed
+                    allowed2 = (allowed1 - fulcrum.allowed) | (fulcrum.allowed - allowed1)
+                    if len(allowed2) != 2:
+                        continue
+                    for group2 in fulcrum.groups:
+                        if group2 == group1:
+                            continue
+                        for end2 in group2.open_cells:
+                            if end2.allowed != allowed2:
+                                continue
+                            overlap_number = next(iter(allowed1 & allowed2))
+                            found = 0
+                            for intersecting in self._intersecting_cells(end1, end2):
+                                if overlap_number in intersecting.allowed:
+                                    found += 1
+                                    intersecting.disallow(overlap_number)
+                            if found == 0:
+                                continue
+                            self.comment = f'{end1} and {end2} pivot against {fulcrum}'
+                            print(f'{self.comment} - eliminated {overlap_number} from {found} other cells')
+                            return True
+
+        return False
+
+    @staticmethod
+    def _intersecting_cells(cell1, cell2):
+        '''Find all cells that intersect with both but are not one of the cells.'''
+        for group1 in cell1.groups:
+            for cell in group1.open_cells:
+                for group2 in cell2.groups:
+                    if cell in group2.cells and cell not in (cell1, cell2):
+                        yield cell
 
     def check_cross_quads(self, groups, coordinate_attr, number):
         allowed_cells = [
