@@ -1,6 +1,7 @@
 #!env python
 
-import argparse, re, itertools, time, collections
+import argparse, re, itertools, time, collections, operator, enum
+from typing import Iterable
 
 NUMBERS = list(range(1, 10))
 
@@ -41,6 +42,10 @@ class Cell:
     @property
     def allowed(self) -> set[int]:
         return self._allowed
+
+    @allowed.setter
+    def allowed(self, allowed):
+        self._allowed = set(allowed)
 
     def disallow(self, number):
         if self._value:
@@ -104,7 +109,7 @@ class Board:
     ]
 
     BOX_CORNERS = [
-        (f'''{'LCR'[row // 3]}{'TCB'[column // 3]}''', column, row)
+        (f'''{'LCR'[column // 3]}{'TCB'[row // 3]}''', column, row)
         for row in (0, 3, 6) for column in (0, 3, 6)
     ]
 
@@ -124,7 +129,11 @@ class Board:
     def get_cell(self, column, row):
         return self.columns[column].cells[row]
 
-    def __iter__(self):
+    def __iter__(self) -> Iterable[Cell]:
+        return iter(self.cells)
+
+    @property
+    def cells(self) -> Iterable[Cell]:
         for column in self.columns:
             yield from column
 
@@ -132,6 +141,16 @@ class Board:
     def open_cells(self):
         for column in self.columns:
             yield from column.open_cells
+
+    def clone(self) -> 'Board':
+        clone = Board()
+        for cell in self:
+            clone_cell = clone.get_cell(cell.location.column, cell.location.row)
+            if cell.value:
+                clone_cell.value = cell.value
+            else:
+                clone_cell.allowed = cell.allowed
+        return clone
 
 
 class BoardPrinter:
@@ -187,6 +206,7 @@ class BoardLoader:
                 match = cls.FORMAT.match(line)
                 if match:
                     data_format = match.group('format')
+                    board_lines = []
                     continue
 
                 board_lines.append(line)
@@ -239,7 +259,8 @@ class BoardLoader:
         with open(path, 'a') as fp:
             print(file=fp)
             if comment:
-                print(f'# {comment}', file=fp)
+                for comment_line in [comment] if isinstance(comment, str) else comment:
+                    print(f'# {comment_line}', file=fp)
             print(f'Format: {cls.SOLVER_FORMAT}', file=fp)
             for row in board.rows:
                 formatted_cells = []
@@ -252,50 +273,130 @@ class BoardLoader:
                 print(' '.join(formatted_cells), file=fp)
 
 
+class Logic(enum.Enum):
+    one_allowed = enum.auto()
+    singular = enum.auto()
+    subgroup = enum.auto()
+    cross_group_elimination = enum.auto()
+    cross_quads = enum.auto()
+    fulcrum_pairs = enum.auto()
+    pair_alternatives = enum.auto()
+
+
 class Solver:
-    def __init__(self, board):
+    ALL_STEPS = frozenset(Logic)
+
+    def __init__(self, board, enabled_steps: set[Logic] = ALL_STEPS, print_moves: bool = True):
+        assert enabled_steps
         self.board = board
         self.comment = None
+        self.enabled_steps = enabled_steps
+        self.print_moves = print_moves
+        self.start_time = time.time()
 
     def is_solved(self) -> bool:
         return all(cell.value for cell in self.board)
 
+    def print(self, *msg):
+        if self.print_moves:
+            elapsed = time.time() - self.start_time
+            minutes = int(elapsed // 60)
+            seconds = int(elapsed - minutes * 60)
+            print(f'[{minutes:02}:{seconds:02}]', *msg)
+
+    def is_step_enabled(self, step: Logic):
+        return step in self.enabled_steps
+
     def one_move(self) -> bool:
-        for cell in self.board:
-            if not cell.value and len(cell.allowed) == 1:
-                value = next(iter(cell.allowed))
-                self.comment = f'In cell at {cell.location}, only {next(iter(cell.allowed))} is allowed'
-                print(f'{self.comment}')
-                cell.value = value
+        _do = self.is_step_enabled
+
+        if _do(Logic.one_allowed):
+            for cell in self.board:
+                if not cell.value and len(cell.allowed) == 1:
+                    value = next(iter(cell.allowed))
+                    self.comment = f'In cell at {cell.location}, only {next(iter(cell.allowed))} is allowed'
+                    self.print(f'{self.comment}')
+                    cell.value = value
+                    return True
+
+        if _do(Logic.singular):
+            for group in self.board.groups:
+                for number in NUMBERS:
+                    if self.check_singular(group, number):
+                        return True
+
+        if _do(Logic.subgroup):
+            for size in (2, 3, 4, 5, 6):
+                for group in self.board.groups:
+                    if self.check_subgroup(group, size):
+                        return True
+
+        if _do(Logic.cross_group_elimination):
+            for group in self.board.groups:
+                for number in NUMBERS:
+                    if self.check_cross_group_elimination(group, number):
+                        return True
+
+        if _do(Logic.cross_quads):
+            for number in NUMBERS:
+                for groups, attr in (
+                    (self.board.rows, operator.attrgetter('column')),
+                    (self.board.columns, operator.attrgetter('row'))
+                ):
+                    if self.check_cross_quads(groups, attr, number):
+                        return True
+
+        if _do(Logic.fulcrum_pairs):
+            if self.check_fulcrum_pairs():
                 return True
 
-        for group in self.board.groups:
-            for number in NUMBERS:
-                if self.check_singular(group, number):
-                    return True
-
-        for size in (2, 3, 4, 5, 6):
-            for group in self.board.groups:
-                if self.check_subgroup(group, size):
-                    return True
-
-        for group in self.board.groups:
-            for number in NUMBERS:
-                if self.check_cross_group_elimination(group, number):
-                    return True
-
-        for number in NUMBERS:
-            for groups, attr in (
-                (self.board.rows, lambda _cell: _cell.column),
-                (self.board.columns, lambda _cell: _cell.row)
-            ):
-                if self.check_cross_quads(groups, attr, number):
-                    return True
-
-        if self.check_fulcrum_pairs():
-            return True
+        if _do(Logic.pair_alternatives):
+            trials = [
+                self.run_trial(cell, max_moves := 30)
+                for cell in self.board.open_cells if len(cell.allowed) == 2
+            ]
+            successful_trials = [trial for trial in trials if trial]
+            if any(successful_trials):
+                cell, chosen, move_count = min(successful_trials, key=operator.itemgetter(2))
+                self.comment = [
+                    f'Found contradiction in {move_count} moves for {cell}, using {chosen}'
+                ] + [
+                    'contradiction detail: {} using {} - {} moves'.format(*choice) for choice in successful_trials
+                ]
+                self.print(f'{self.comment[0]}')
+                cell.value = chosen
+                return True
+            else:
+                self.print(f'No contradictions fround in {len(trials)} trials with up to {max_moves} moves each')
 
         return False
+
+    def run_trial(self, cell, max_moves):
+        location = cell.location
+        allowed = list(cell.allowed)
+        passed, move_counts = [], []
+        for number in allowed:
+            branch = self.clone()
+            branch.board.get_cell(location.column, location.row).value = number
+            move_counts.append(0)
+            try:
+                for move_count in range(max_moves):
+                    if not branch.one_move():
+                        break
+                    move_counts[-1] += 1
+                passed.append(True)
+            except SolveError:
+                passed.append(False)
+
+        if all(passed):
+            return False
+
+        try:
+            chosen = passed.index(True)
+        except ValueError:
+            raise SolveError(f'Contradiction - each allowed number for {cell} produced a contradiction')
+
+        return cell, allowed[chosen], move_counts[(chosen + 1) % 2]
 
     def check_fulcrum_pairs(self):
         for fulcrum in self.board.open_cells:
@@ -324,7 +425,7 @@ class Solver:
                             if found == 0:
                                 continue
                             self.comment = f'{end1} and {end2} pivot against {fulcrum}'
-                            print(f'{self.comment} - eliminated {overlap_number} from {found} other cells')
+                            self.print(f'{self.comment} - eliminated {overlap_number} from {found} other cells')
                             return True
 
         return False
@@ -353,7 +454,7 @@ class Solver:
         for key, cells in itertools.groupby(allowed_pairs, _key):
             cells = list(cells)
             if len(cells) == 2:
-                print(f'QUADS: {number} in {cells}')
+                pass  # print(f'QUADS: {number} in {cells}')
 
         return False
 
@@ -366,7 +467,7 @@ class Solver:
         if len(allowed_cells) == 0:
             raise SolveError(f'Contradiction: {number} is not allowed in any cell in {group}')
         self.comment = f'{group} allows {number} only in {allowed_cells[0]}'
-        print(f'{self.comment}')
+        self.print(f'{self.comment}')
         allowed_cells[0].value = number
         return True
 
@@ -389,7 +490,7 @@ class Solver:
                 continue
             digit_str = ''.join(str(digit) for digit in digits)
             self.comment = f'In {group}, cells allowing {digit_str} formed a subgroup'
-            print(f'{self.comment} - disallowed digits in {cell_count} other cells in the group')
+            self.print(f'{self.comment} - disallowed digits in {cell_count} other cells in the group')
             return True
 
         return False
@@ -420,10 +521,13 @@ class Solver:
 
         if marked:
             self.comment = f'In {group}, cells allowing {number} were exclusively in {cross_group}'
-            print(f'{self.comment} - disallowed {number} in {marked} cells in {cross_group}')
+            self.print(f'{self.comment} - disallowed {number} in {marked} cells in {cross_group}')
             return True
 
         return False
+
+    def clone(self):
+        return Solver(self.board.clone(), self.enabled_steps - {Logic.pair_alternatives}, False)
 
 
 def main():
@@ -431,16 +535,23 @@ def main():
     parser.add_argument('file', metavar='PATH', help='file of puzzle')
     parser.add_argument('--solve', action='store_true', help='Run until done')
     parser.add_argument('--delay', metavar='SECONDS', help='Sleep between solving turns', type=float, default=0)
+    parser.add_argument(
+        '--step', metavar='STEP', choices=Logic, type=Logic.__getitem__, action='append', default=[], help=(
+            'Enable a step (for debugging) - if specified one or more times, only those steps will be used, otherwise '
+            'all steps will be used'
+        )
+    )
     args = parser.parse_args()
 
     board = BoardLoader.from_file(args.file)
-    solver = Solver(board)
+    enabled_steps = set(args.step) or Solver.ALL_STEPS
+    solver = Solver(board, enabled_steps)
     while True:
         if solver.is_solved():
-            print('Solved!')
+            solver.print('Solved!')
             break
         if not solver.one_move():
-            print('No moves found!')
+            solver.print('No moves found!')
             break
         BoardLoader.append_to_file(args.file, board, solver.comment)
         print(BoardPrinter.format(board))
