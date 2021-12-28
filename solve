@@ -1,10 +1,12 @@
 #!env python
 
 import argparse, re, itertools, time, collections, operator, enum
+import functools
 from typing import Iterable
 
 NUMBERS = list(range(1, 10))
-
+GET_COLUMN = operator.attrgetter('column')
+GET_ROW = operator.attrgetter('row')
 
 class SolveError(Exception):
     pass
@@ -279,6 +281,7 @@ class Logic(enum.Enum):
     subgroup = enum.auto()
     cross_group_elimination = enum.auto()
     cross_quads = enum.auto()
+    cross_hexes = enum.auto()
     fulcrum_pairs = enum.auto()
     pair_alternatives = enum.auto()
 
@@ -339,11 +342,14 @@ class Solver:
 
         if _do(Logic.cross_quads):
             for number in NUMBERS:
-                for groups, attr in (
-                    (self.board.rows, operator.attrgetter('column')),
-                    (self.board.columns, operator.attrgetter('row'))
-                ):
+                for groups, attr in ((self.board.rows, GET_COLUMN), (self.board.columns, GET_ROW)):
                     if self.check_cross_quads(groups, attr, number):
+                        return True
+
+        if _do(Logic.cross_hexes):
+            for number in NUMBERS:
+                for groups, attr in ((self.board.rows, GET_COLUMN), (self.board.columns, GET_ROW)):
+                    if self.check_cross_hexes(groups, attr, number):
                         return True
 
         if _do(Logic.fulcrum_pairs):
@@ -454,7 +460,31 @@ class Solver:
         for key, cells in itertools.groupby(allowed_pairs, _key):
             cells = list(cells)
             if len(cells) == 2:
-                pass  # print(f'QUADS: {number} in {cells}')
+                print(f'QUADS: {number} in {cells}')
+
+        return False
+
+    def check_cross_hexes(self, groups, coordinate_attr, number):
+        allowed_cells = [
+            [cell for cell in group.open_cells if number in cell.allowed]
+            for group in groups
+        ]
+        allowed_pairs = [cells for cells in allowed_cells if len(cells) == 2]
+        if len(allowed_pairs) < 3:
+            return False
+
+        def _key(cells):
+            return frozenset(coordinate_attr(cell.location) for cell in cells)
+
+        cells_by_coordinate = {_key(cells): cells for cells in allowed_pairs}
+        allowed_numbers = functools.reduce(operator.or_, cells_by_coordinate.keys())
+        for triplet in itertools.combinations(allowed_numbers, 3):
+            valid_sets = [
+                cells_by_coordinate.get(frozenset([triplet[index1], triplet[index2]]))
+                for index1, index2 in [(0, 1), (0, 2), (1, 2)]
+            ]
+            if all(valid_sets):
+                print(f'HEXES: {valid_sets}')
 
         return False
 
