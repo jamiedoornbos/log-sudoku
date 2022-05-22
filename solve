@@ -8,12 +8,13 @@ NUMBERS = list(range(1, 10))
 GET_COLUMN = operator.attrgetter('column')
 GET_ROW = operator.attrgetter('row')
 
+
 class SolveError(Exception):
     pass
 
 
 class Location:
-    def __init__(self, column, row):
+    def __init__(self, column: int, row: int):
         self.column = column
         self.row = row
 
@@ -118,7 +119,8 @@ class Board:
     def __init__(self):
         n_range = range(len(NUMBERS))
         self.columns = [
-            Group(f'Column {column + 1}', [Cell(Location(column, row)) for row in n_range]) for column in n_range]
+            Group(f'Column {column + 1}', [Cell(Location(column, row)) for row in n_range]) for column in n_range
+        ]
         self.rows = [
             Group(f'Row {row + 1}', [self.get_cell(column, row) for column in n_range]) for row in n_range
         ]
@@ -190,15 +192,16 @@ class BoardPrinter:
 
 class BoardLoader:
     FORMAT = re.compile(r'^Format: (?P<format>\S+)$')
+    MOVE_NUM = re.compile(r'^Move: (?P<move>\S+)$')
     COMMENT = re.compile(r'^\s*(#.*)?$')
     CELL_SEPARATOR = re.compile(r'\s+')
     START_FORMAT = 'start'
     SOLVER_FORMAT = 'solver'
 
     @classmethod
-    def from_file(cls, path) -> 'Board':
+    def from_file(cls, path) -> tuple['Board', int]:
         data_format = cls.START_FORMAT
-        board_lines = []
+        board_lines, move = [], None
         with open(path) as fp:
             for line in fp:
                 match = cls.COMMENT.match(line)
@@ -208,7 +211,12 @@ class BoardLoader:
                 match = cls.FORMAT.match(line)
                 if match:
                     data_format = match.group('format')
-                    board_lines = []
+                    board_lines, move = [], None
+                    continue
+
+                match = cls.MOVE_NUM.match(line)
+                if match:
+                    move = int(match.group('move'))
                     continue
 
                 board_lines.append(line)
@@ -236,7 +244,7 @@ class BoardLoader:
                         if not (NUMBERS[0] <= number <= NUMBERS[-1]):
                             raise Exception(f'Cell at {location} is out of range: {value}')
                         board.get_cell(*location).value = number
-            return board
+            return board, move
 
         for row_number, row in enumerate(board_lines):
             row_cells = cls.CELL_SEPARATOR.split(row)
@@ -254,16 +262,17 @@ class BoardLoader:
                     for number in set(NUMBERS) - set(int(allowed) for allowed in value):
                         cell.disallow(number)
 
-        return board
+        return board, move
 
     @classmethod
-    def append_to_file(cls, path, board, comment=None):
+    def append_to_file(cls, path, board, comment, move):
         with open(path, 'a') as fp:
             print(file=fp)
             if comment:
                 for comment_line in [comment] if isinstance(comment, str) else comment:
                     print(f'# {comment_line}', file=fp)
             print(f'Format: {cls.SOLVER_FORMAT}', file=fp)
+            print(f'Move: {move}', file=fp)
             for row in board.rows:
                 formatted_cells = []
                 for cell in row:
@@ -289,12 +298,13 @@ class Logic(enum.Enum):
 class Solver:
     ALL_STEPS = frozenset(Logic)
 
-    def __init__(self, board, enabled_steps: set[Logic] = ALL_STEPS, print_moves: bool = True):
+    def __init__(self, board, enabled_steps: set[Logic], print_moves: bool = True):
         assert enabled_steps
         self.board = board
         self.comment = None
         self.enabled_steps = enabled_steps
         self.print_moves = print_moves
+        self.use_time_stamps = False
         self.start_time = time.time()
 
     def is_solved(self) -> bool:
@@ -302,10 +312,13 @@ class Solver:
 
     def print(self, *msg):
         if self.print_moves:
-            elapsed = time.time() - self.start_time
-            minutes = int(elapsed // 60)
-            seconds = int(elapsed - minutes * 60)
-            print(f'[{minutes:02}:{seconds:02}]', *msg)
+            if self.use_time_stamps:
+                elapsed = time.time() - self.start_time
+                minutes = int(elapsed // 60)
+                seconds = int(elapsed - minutes * 60)
+                print(f'[{minutes:02}:{seconds:02}]', *msg)
+            else:
+                print(*msg)
 
     def is_step_enabled(self, step: Logic):
         return step in self.enabled_steps
@@ -342,9 +355,8 @@ class Solver:
 
         if _do(Logic.cross_quads):
             for number in NUMBERS:
-                for groups, attr in ((self.board.rows, GET_COLUMN), (self.board.columns, GET_ROW)):
-                    if self.check_cross_quads(groups, attr, number):
-                        return True
+                if self.check_cross_quads(number):
+                    return True
 
         if _do(Logic.cross_hexes):
             for number in NUMBERS:
@@ -363,11 +375,12 @@ class Solver:
             ]
             successful_trials = [trial for trial in trials if trial]
             if any(successful_trials):
-                cell, chosen, move_count = min(successful_trials, key=operator.itemgetter(2))
+                cell, chosen, move_count, not_chosen = min(successful_trials, key=operator.itemgetter(2))
                 self.comment = [
-                    f'Found contradiction in {move_count} moves for {cell}, using {chosen}'
+                    f'Using {not_chosen} in {cell} led to a contradiction - using {chosen}'
                 ] + [
-                    'contradiction detail: {} using {} - {} moves'.format(*choice) for choice in successful_trials
+                    'detail: Using {3} in {0} contradicted in {2} moves - using {1}'.format(*choice)
+                    for choice in successful_trials
                 ]
                 self.print(f'{self.comment[0]}')
                 cell.value = chosen
@@ -402,7 +415,8 @@ class Solver:
         except ValueError:
             raise SolveError(f'Contradiction - each allowed number for {cell} produced a contradiction')
 
-        return cell, allowed[chosen], move_counts[(chosen + 1) % 2]
+        not_chosen = (chosen + 1) % 2
+        return cell, allowed[chosen], move_counts[not_chosen], allowed[not_chosen]
 
     def check_fulcrum_pairs(self):
         for fulcrum in self.board.open_cells:
@@ -445,24 +459,31 @@ class Solver:
                     if cell in group2.cells and cell not in (cell1, cell2):
                         yield cell
 
-    def check_cross_quads(self, groups, coordinate_attr, number):
-        allowed_cells = [
-            [cell for cell in group.open_cells if number in cell.allowed]
-            for group in groups
-        ]
-        allowed_pairs = [cells for cells in allowed_cells if len(cells) == 2]
-        if len(allowed_pairs) < 2:
-            return False
+    @staticmethod
+    def _row_coordinates(cells: list[Cell]) -> tuple[int]:
+        return tuple(cell.location.row for cell in cells)
 
-        def _key(cells):
-            return frozenset(coordinate_attr(cell.location) for cell in cells)
+    @staticmethod
+    def _column_coordinates(cells: list[Cell]) -> tuple[int]:
+        return tuple(cell.location.column for cell in cells)
 
-        for key, cells in itertools.groupby(allowed_pairs, _key):
-            cells = list(cells)
-            if len(cells) == 2:
-                print(f'QUADS: {number} in {cells}')
-
+    def check_cross_quads(self, number):
+        row_quads = set(map(frozenset, self._find_cross_quads(self.board.rows, self._column_coordinates, number)))
+        col_quads = set(map(frozenset, self._find_cross_quads(self.board.columns, self._row_coordinates, number)))
+        # for quad in row_quads | col_quads:
+        #     self.print(f'QUAD FOR {number}: {quad}')
+        for quad in (row_quads - col_quads):
+            self.print(f'ROW QUAD FOR {number}: {quad}')
+        for quad in (col_quads - row_quads):
+            self.print(f'COLUMN QUAD FOR {number}: {quad}')
         return False
+
+    @staticmethod
+    def _find_cross_quads(groups, coordinate_key, number):
+        allowed = [[cell for cell in group.open_cells if number in cell.allowed] for group in groups]
+        allowed = sorted((cells for cells in allowed if len(cells) == 2), key=coordinate_key)
+        potential_quads = [list(cells) for _, cells in itertools.groupby(allowed, coordinate_key)]
+        return [cells[0] + cells[1] for cells in potential_quads if len(cells) == 2]
 
     def check_cross_hexes(self, groups, coordinate_attr, number):
         allowed_cells = [
@@ -484,7 +505,7 @@ class Solver:
                 for index1, index2 in [(0, 1), (0, 2), (1, 2)]
             ]
             if all(valid_sets):
-                print(f'HEXES: {valid_sets}')
+                self.print(f'HEXES: {number} in {valid_sets}')
 
         return False
 
@@ -565,29 +586,35 @@ def main():
     parser.add_argument('file', metavar='PATH', help='file of puzzle')
     parser.add_argument('--solve', action='store_true', help='Run until done')
     parser.add_argument('--delay', metavar='SECONDS', help='Sleep between solving turns', type=float, default=0)
+    parser.add_argument('--moves', metavar='N', help='Run through N moves', type=int, default=1)
     parser.add_argument(
         '--step', metavar='STEP', choices=Logic, type=Logic.__getitem__, action='append', default=[], help=(
             'Enable a step (for debugging) - if specified one or more times, only those steps will be used, otherwise '
             'all steps will be used'
         )
     )
+    parser.add_argument(
+        '--no-step', metavar='STEP', choices=Logic, type=Logic.__getitem__, action='append', default=[], help=(
+            'Disable a step (for debugging) - if specified one or more times, all steps will be used except those given'
+        )
+    )
     args = parser.parse_args()
 
-    board = BoardLoader.from_file(args.file)
+    board, last_move = BoardLoader.from_file(args.file)
     enabled_steps = set(args.step) or Solver.ALL_STEPS
+    enabled_steps -= set(args.no_step)
     solver = Solver(board, enabled_steps)
-    while True:
+    last_move = last_move or 0
+    for move in range(10000 if args.solve else args.moves):
         if solver.is_solved():
             solver.print('Solved!')
             break
         if not solver.one_move():
             solver.print('No moves found!')
             break
-        BoardLoader.append_to_file(args.file, board, solver.comment)
-        print(BoardPrinter.format(board))
-        if not args.solve:
-            break
+        BoardLoader.append_to_file(args.file, board, solver.comment, last_move + move + 1)
         time.sleep(args.delay)
+    print(BoardPrinter.format(board))
 
 
 if __name__ == '__main__':
